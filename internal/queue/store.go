@@ -162,3 +162,28 @@ func (s *Store) GetJob(ctx context.Context, jobID JobID) (*Job, error) {
 
 	return &j, nil
 }
+
+func (s *Store) UpdateHeartbeat(ctx context.Context, workerID string, JobIDs []JobID, checkpoints [][]byte) error {
+	if len(JobIDs) == 0 {
+		return nil
+	}
+
+	sql := `UPDATE jobs j SET heartbeat_at = now(),
+					checkpoint = coalesce(v.checkpoint, j.checkpoint)
+			FROM (SELECT unnest($1::uuid[]) AS id, unnest($2::jsonb[]) AS checkpoint) v
+			WHERE j.id = v.id AND j.claimed_by = $3`
+
+	checkpointValues := make([]interface{}, len(checkpoints))
+	for i, cp := range checkpoints {
+		if cp != nil {
+			checkpointValues[i] = json.RawMessage(cp)
+		}
+	}
+
+	_, err := s.execer.Exec(ctx, sql, JobIDs, checkpointValues, workerID)
+	if err != nil {
+		return fmt.Errorf("update heartbeat: %w", err)
+	}
+
+	return nil
+}
