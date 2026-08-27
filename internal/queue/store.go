@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -186,4 +187,46 @@ func (s *Store) UpdateHeartbeat(ctx context.Context, workerID string, JobIDs []J
 	}
 
 	return nil
+}
+
+func (s *Store) ReclaimStaleJobs(ctx context.Context, threshold time.Duration, limit int) ([]Job, error) {
+	sql := `UPDATE jobs SET state = $1, claimed_by = NULL, claimed_at = NULL,
+				heartbeat_at = NULL, updated_at = now()
+			WHERE id IN (
+				SELECT id FROM jobs
+				WHERE state = $2 AND heartbeat_at < now() - $3::interval
+				ORDER BY heartbeat_at
+				FOR UPDATE SKIP LOCKED
+				LIMIT $4
+			)
+			RETURNING id, queue, job_type, payload_version, payload, state, attempt,
+				max_attempts, run_at, claimed_at, claimed_by, heartbeat_at, last_error,
+				last_error_class, checkpoint, created_at, updated_at`
+
+	rows, err := s.execer.Query(ctx, sql, string(StatePending), string(StateClaimed), threshold, limit)
+	if err != nil {
+		return nil, fmt.Errorf("reclaim stale jobs: %w", err)
+	}
+	defer rows.Close()
+
+	jobs := make([]Job, 0, limit)
+	for rows.Next() {
+		var j Job
+		err := rows.Scan(
+			&j.ID, &j.Queue, &j.JobType, &j.PayloadVersion, &j.Payload,
+			&j.State, &j.Attempt, &j.MaxAttempts, &j.RunAt, &j.ClaimedAt,
+			&j.ClaimedBy, &j.HeartbeatAt, &j.LastError, &j.LastErrorClass,
+			&j.Checkpoint, &j.CreatedAt, &j.UpdatedAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("scan reclaimed job: %w", err)
+		}
+		jobs = append(jobs, j)
+	}
+
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows error: %w", err)
+	}
+
+	return jobs, nil
 }
