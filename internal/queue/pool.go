@@ -16,6 +16,7 @@ type JobMeta struct {
 	MaxAttempts int
 	Checkpoint  []byte
 	EnqueuedAt  time.Time
+	Payload     []byte
 }
 
 type Handler func(ctx context.Context, meta JobMeta) error
