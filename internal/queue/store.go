@@ -230,3 +230,80 @@ func (s *Store) ReclaimStaleJobs(ctx context.Context, threshold time.Duration, l
 
 	return jobs, nil
 }
+
+func (s *Store) RefundAttempt(ctx context.Context, jobID JobID, workerID string) error {
+	sql := `UPDATE jobs SET attempt = attempt - 1, updated_at = now()
+			WHERE id = $1 AND claimed_by = $2 AND attempt > 0`
+
+	_, err := s.execer.Exec(ctx, sql, jobID, workerID)
+	if err != nil {
+		return fmt.Errorf("refund attempt: %w", err)
+	}
+
+	return nil
+}
+
+func (s *Store) RetryJobWithCheckpoint(ctx context.Context, jobID JobID, workerID string, runAt interface{}, checkpoint []byte) error {
+	sql := `UPDATE jobs
+			SET state = $1, claimed_by = NULL, claimed_at = NULL, heartbeat_at = NULL,
+				run_at = $2, checkpoint = $3, attempt = attempt - 1, updated_at = now()
+			WHERE id = $4 AND claimed_by = $5`
+
+	_, err := s.execer.Exec(ctx, sql,
+		string(StatePending), runAt, checkpoint, jobID, workerID)
+	if err != nil {
+		return fmt.Errorf("retry job with checkpoint: %w", err)
+	}
+
+	return nil
+}
+
+func (s *Store) ListDeadLetter(ctx context.Context, queue string, limit int) ([]Job, error) {
+	sql := `SELECT id, queue, job_type, payload_version, payload, state, attempt,
+			max_attempts, run_at, claimed_at, claimed_by, heartbeat_at, last_error,
+			last_error_class, checkpoint, created_at, updated_at
+		FROM jobs
+		WHERE state = $1 AND queue = $2
+		ORDER BY updated_at DESC
+		LIMIT $3`
+
+	rows, err := s.execer.Query(ctx, sql, string(StateDead), queue, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list dead letter: %w", err)
+	}
+	defer rows.Close()
+
+	jobs := make([]Job, 0, limit)
+	for rows.Next() {
+		var j Job
+		err := rows.Scan(
+			&j.ID, &j.Queue, &j.JobType, &j.PayloadVersion, &j.Payload,
+			&j.State, &j.Attempt, &j.MaxAttempts, &j.RunAt, &j.ClaimedAt,
+			&j.ClaimedBy, &j.HeartbeatAt, &j.LastError, &j.LastErrorClass,
+			&j.Checkpoint, &j.CreatedAt, &j.UpdatedAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("scan dead letter job: %w", err)
+		}
+		jobs = append(jobs, j)
+	}
+
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows error: %w", err)
+	}
+
+	return jobs, nil
+}
+
+func (s *Store) RequeueDeadLetter(ctx context.Context, jobID JobID) error {
+	sql := `UPDATE jobs
+			SET state = $1, attempt = 0, run_at = now(), updated_at = now()
+			WHERE id = $2 AND state = $3`
+
+	_, err := s.execer.Exec(ctx, sql, string(StatePending), jobID, string(StateDead))
+	if err != nil {
+		return fmt.Errorf("requeue dead letter: %w", err)
+	}
+
+	return nil
+}
