@@ -1,13 +1,18 @@
-package worker
+package main
 
 import (
 	"context"
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
+	"github.com/bronzedior/settleflow/internal/migrations"
 	"github.com/bronzedior/settleflow/internal/queue"
+	"github.com/bronzedior/settleflow/internal/worker"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -19,14 +24,21 @@ func main() {
 }
 
 func run() error {
-	poolURL := os.Getenv("DATABASE_URL")
-	if poolURL == "" {
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
 		return fmt.Errorf("DATABASE_URL not set")
 	}
 
-	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
-	pool, err := pgxpool.New(ctx, poolURL)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := applyMigrations(ctx, databaseURL); err != nil {
+		return fmt.Errorf("apply migrations: %w", err)
+	}
+
+	pool, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {
 		return fmt.Errorf("connect to database: %w", err)
 	}
@@ -36,47 +48,67 @@ func run() error {
 		return fmt.Errorf("ping database: %w", err)
 	}
 
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	store := queue.NewStore(queue.WrapPgx(pool))
-
 	workerID := os.Getenv("WORKER_ID")
 	if workerID == "" {
 		workerID = fmt.Sprintf("worker-%d", os.Getpid())
 	}
 
-	queues := []string{"default"}
-	maxBatch := 1
+	registry := queue.NewRegistry(logger)
+	if err := registerHandlers(registry); err != nil {
+		return fmt.Errorf("register handlers: %w", err)
+	}
+
+	config := &queue.PoolConfig{
+		WorkerID:          workerID,
+		Queues:            []string{"default"},
+		Concurrency:       10,
+		MaxBatch:          10,
+		PollInterval:      1 * time.Second,
+		HeartbeatInterval: 5 * time.Second,
+		ReaperThreshold:   60 * time.Second,
+		JobTimeout:        30 * time.Second,
+		Logger:            logger,
+	}
+
+	supervisor, err := worker.CreateWorkerStack(pool, config, registry, logger)
+	if err != nil {
+		return fmt.Errorf("create worker stack: %w", err)
+	}
 
 	logger.Info("Starting worker", "workerID", workerID)
-
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
-			jobs, err := store.ClaimJobs(ctx, workerID, queues, maxBatch)
-			if err != nil {
-				logger.Error("Failed to claim jobs", "err", err)
-				continue
-			}
-
-			for _, job := range jobs {
-				logger.Info("Claimed job", "jobID", job.ID, "jobType", job.JobType)
-
-				err := store.CompleteJob(ctx, job.ID, workerID)
-				if err != nil {
-					logger.Error("Failed to complete job", "jobID", job.ID, "err", err)
-					err = store.FailJob(ctx, job.ID, workerID, err.Error(), queue.ErrorClassPermanent)
-					if err != nil {
-						logger.Error("Failed to mark job as failed", "jobID", job.ID, "err", err)
-					}
-				} else {
-					logger.Info("Completed job", "jobID", job.ID)
-				}
-			}
-		}
+	if err := supervisor.StartAll(ctx); err != nil {
+		return fmt.Errorf("start worker stack: %w", err)
 	}
+
+	<-ctx.Done()
+	logger.Info("Shutdown signal received, draining in-flight jobs")
+
+	stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	return supervisor.StopAll(stopCtx)
+}
+
+func applyMigrations(ctx context.Context, databaseURL string) error {
+	conn, err := pgx.Connect(ctx, databaseURL)
+	if err != nil {
+		return fmt.Errorf("connect for migrations: %w", err)
+	}
+	defer conn.Close(ctx)
+
+	return migrations.RunMigrations(ctx, conn)
+}
+
+type TestJobArgs struct {
+	Index    int    `json:"index"`
+	Duration string `json:"duration"`
+}
+
+func registerHandlers(registry *queue.Registry) error {
+	return queue.Register(registry, "test", 1, 20, func(ctx context.Context, args TestJobArgs) error {
+		if d, err := time.ParseDuration(args.Duration); err == nil {
+			time.Sleep(d)
+		}
+		return nil
+	})
 }

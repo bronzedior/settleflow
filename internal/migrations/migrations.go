@@ -19,7 +19,7 @@ func RunMigrations(ctx context.Context, conn *pgx.Conn) error {
 
 	var upMigrations []string
 	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".up.sql") {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), "_up.sql") {
 			upMigrations = append(upMigrations, e.Name())
 		}
 	}
