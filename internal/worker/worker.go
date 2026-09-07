@@ -5,13 +5,12 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/bronzedior/settleflow/internal/lifecycle"
 	"github.com/bronzedior/settleflow/internal/queue"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type Worker struct {
-	lifecycle.ComponentBase
+	name     string
 	pool     *queue.Pool
 	executor *queue.Executor
 	logger   *slog.Logger
@@ -25,13 +24,17 @@ func NewWorker(
 	logger *slog.Logger,
 ) *Worker {
 	return &Worker{
-		ComponentBase: lifecycle.NewComponentBase("worker"),
-		pool:          pool,
-		executor:      executor,
-		logger:        logger,
-		stopCh:        make(chan struct{}),
-		doneCh:        make(chan struct{}),
+		name:     "worker",
+		pool:     pool,
+		executor: executor,
+		logger:   logger,
+		stopCh:   make(chan struct{}),
+		doneCh:   make(chan struct{}),
 	}
+}
+
+func (w *Worker) Name() string {
+	return w.name
 }
 
 func (w *Worker) Start(ctx context.Context) error {
@@ -154,7 +157,7 @@ func CreateWorker(
 	registry *queue.Registry,
 	logger *slog.Logger,
 ) (*Worker, error) {
-	store := queue.NewStore(queue.WrapPgx(pool))
+	store := queue.NewPgxStore(pool)
 
 	jobPool := queue.NewPool(store, config)
 

@@ -5,8 +5,6 @@ import (
 	"log/slog"
 	"sync"
 	"time"
-
-	"github.com/bronzedior/settleflow/internal/lifecycle"
 )
 
 type JobMeta struct {
@@ -32,20 +30,17 @@ type PoolConfig struct {
 }
 
 type Pool struct {
-	lifecycle.ComponentBase
-	config *PoolConfig
-	store  *Store
-
-	baseCtx   context.Context
-	drainCh   chan struct{}
-	doneOnce  sync.Once
-	drainOnce sync.Once
-
+	name        string
+	config      *PoolConfig
+	store       *Store
+	baseCtx     context.Context
+	drainCh     chan struct{}
+	doneOnce    sync.Once
+	drainOnce   sync.Once
 	freeSlotsmu sync.Mutex
 	freeSlots   int
-
-	activemu     sync.Mutex
-	activeJobs   map[JobID]*ActiveJob
+	activemu    sync.Mutex
+	activeJobs  map[JobID]*ActiveJob
 	drainTimeout time.Duration
 }
 
@@ -62,14 +57,18 @@ func NewPool(store *Store, config *PoolConfig) *Pool {
 	}
 
 	return &Pool{
-		ComponentBase: lifecycle.NewComponentBase("pool"),
-		config:        config,
-		store:         store,
-		drainCh:       make(chan struct{}),
-		freeSlots:     config.Concurrency,
-		activeJobs:    make(map[JobID]*ActiveJob),
-		drainTimeout:  30 * time.Second,
+		name:        "pool",
+		config:      config,
+		store:       store,
+		drainCh:     make(chan struct{}),
+		freeSlots:   config.Concurrency,
+		activeJobs:  make(map[JobID]*ActiveJob),
+		drainTimeout: 30 * time.Second,
 	}
+}
+
+func (p *Pool) Name() string {
+	return p.name
 }
 
 func (p *Pool) Start(ctx context.Context) error {

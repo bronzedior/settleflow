@@ -14,6 +14,21 @@ type Execer interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
+const jobSelectFields = `id, queue, job_type, payload_version, payload, state, attempt,
+		max_attempts, run_at, claimed_at, claimed_by, last_error,
+		last_error_class, created_at, updated_at`
+
+func scanJobRow(row interface {
+	Scan(...any) error
+}, j *Job) error {
+	return row.Scan(
+		&j.ID, &j.Queue, &j.JobType, &j.PayloadVersion, &j.Payload,
+		&j.State, &j.Attempt, &j.MaxAttempts, &j.RunAt, &j.ClaimedAt,
+		&j.ClaimedBy, &j.LastError, &j.LastErrorClass,
+		&j.CreatedAt, &j.UpdatedAt,
+	)
+}
+
 type Store struct {
 	execer Execer
 }
@@ -55,11 +70,7 @@ func (s *Store) ClaimJobs(ctx context.Context, workerID string, queues []string,
 			LIMIT $5
 		) s
 		WHERE j.id = s.id
-		RETURNING j.id, j.queue, j.job_type, j.payload_version, j.payload,
-			j.state, j.attempt, j.max_attempts, j.run_at, j.claimed_at,
-			j.claimed_by, j.last_error, j.last_error_class,
-			j.created_at, j.updated_at
-	`
+		RETURNING ` + jobSelectFields
 
 	rows, err := s.execer.Query(ctx, sql,
 		string(StateClaimed), workerID, string(StatePending), queues, k)
@@ -71,13 +82,7 @@ func (s *Store) ClaimJobs(ctx context.Context, workerID string, queues []string,
 	jobs := make([]Job, 0, k)
 	for rows.Next() {
 		var j Job
-		err := rows.Scan(
-			&j.ID, &j.Queue, &j.JobType, &j.PayloadVersion, &j.Payload,
-			&j.State, &j.Attempt, &j.MaxAttempts, &j.RunAt, &j.ClaimedAt,
-			&j.ClaimedBy, &j.LastError, &j.LastErrorClass,
-			&j.CreatedAt, &j.UpdatedAt,
-		)
-		if err != nil {
+		if err := scanJobRow(rows, &j); err != nil {
 			return nil, fmt.Errorf("scan job: %w", err)
 		}
 		jobs = append(jobs, j)
@@ -140,18 +145,10 @@ func (s *Store) RetryJob(ctx context.Context, jobID JobID, workerID string, runA
 }
 
 func (s *Store) GetJob(ctx context.Context, jobID JobID) (*Job, error) {
-	sql := `SELECT id, queue, job_type, payload_version, payload, state, attempt,
-			max_attempts, run_at, claimed_at, claimed_by, last_error,
-			last_error_class, created_at, updated_at
-		FROM jobs WHERE id = $1`
+	sql := `SELECT ` + jobSelectFields + ` FROM jobs WHERE id = $1`
 
 	var j Job
-	err := s.execer.QueryRow(ctx, sql, jobID).Scan(
-		&j.ID, &j.Queue, &j.JobType, &j.PayloadVersion, &j.Payload,
-		&j.State, &j.Attempt, &j.MaxAttempts, &j.RunAt, &j.ClaimedAt,
-		&j.ClaimedBy, &j.LastError, &j.LastErrorClass,
-		&j.CreatedAt, &j.UpdatedAt,
-	)
+	err := scanJobRow(s.execer.QueryRow(ctx, sql, jobID), &j)
 
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -163,12 +160,8 @@ func (s *Store) GetJob(ctx context.Context, jobID JobID) (*Job, error) {
 	return &j, nil
 }
 
-
 func (s *Store) ListDeadLetter(ctx context.Context, queue string, limit int) ([]Job, error) {
-	sql := `SELECT id, queue, job_type, payload_version, payload, state, attempt,
-			max_attempts, run_at, claimed_at, claimed_by, last_error,
-			last_error_class, created_at, updated_at
-		FROM jobs
+	sql := `SELECT ` + jobSelectFields + ` FROM jobs
 		WHERE state = $1 AND queue = $2
 		ORDER BY updated_at DESC
 		LIMIT $3`
@@ -182,13 +175,7 @@ func (s *Store) ListDeadLetter(ctx context.Context, queue string, limit int) ([]
 	jobs := make([]Job, 0, limit)
 	for rows.Next() {
 		var j Job
-		err := rows.Scan(
-			&j.ID, &j.Queue, &j.JobType, &j.PayloadVersion, &j.Payload,
-			&j.State, &j.Attempt, &j.MaxAttempts, &j.RunAt, &j.ClaimedAt,
-			&j.ClaimedBy, &j.LastError, &j.LastErrorClass,
-			&j.CreatedAt, &j.UpdatedAt,
-		)
-		if err != nil {
+		if err := scanJobRow(rows, &j); err != nil {
 			return nil, fmt.Errorf("scan dead letter job: %w", err)
 		}
 		jobs = append(jobs, j)

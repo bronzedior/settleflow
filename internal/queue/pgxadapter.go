@@ -7,18 +7,14 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-type PgxExecutor interface {
+type pgxExecutor interface {
 	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
 	Query(ctx context.Context, sql string, arguments ...any) (pgx.Rows, error)
 	QueryRow(ctx context.Context, sql string, arguments ...any) pgx.Row
 }
 
 type pgxAdapter struct {
-	executor PgxExecutor
-}
-
-func WrapPgx(executor PgxExecutor) Execer {
-	return &pgxAdapter{executor: executor}
+	executor pgxExecutor
 }
 
 func (a *pgxAdapter) Exec(ctx context.Context, sql string, args ...any) (interface{}, error) {
@@ -32,4 +28,12 @@ func (a *pgxAdapter) Query(ctx context.Context, sql string, args ...any) (pgx.Ro
 
 func (a *pgxAdapter) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
 	return a.executor.QueryRow(ctx, sql, args...)
+}
+
+func NewPgxStore(executor pgxExecutor) *Store {
+	return NewStore(&pgxAdapter{executor: executor})
+}
+
+func WrapPgx(executor pgxExecutor) Execer {
+	return &pgxAdapter{executor: executor}
 }
