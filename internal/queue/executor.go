@@ -26,12 +26,10 @@ func NewExecutor(config *ExecutorConfig) *Executor {
 }
 
 type ExecutionResult struct {
-	State         JobState
-	ErrorMsg      string
-	ErrorClass    ErrorClass
-	Checkpoint    []byte
-	RunAt         time.Time
-	RefundAttempt bool
+	State      JobState
+	ErrorMsg   string
+	ErrorClass ErrorClass
+	RunAt      time.Time
 }
 
 func (e *Executor) Execute(ctx context.Context, job Job) ExecutionResult {
@@ -49,7 +47,6 @@ func (e *Executor) Execute(ctx context.Context, job Job) ExecutionResult {
 		ID:          job.ID,
 		Attempt:     job.Attempt,
 		MaxAttempts: maxAttempts,
-		Checkpoint:  job.Checkpoint,
 		EnqueuedAt:  job.CreatedAt,
 		Payload:     job.Payload,
 	}
@@ -71,7 +68,7 @@ func (e *Executor) Execute(ctx context.Context, job Job) ExecutionResult {
 func (e *Executor) classifyResult(job Job, err error, maxAttempts int) ExecutionResult {
 	if err == nil {
 		return ExecutionResult{
-			State: StateDead, // Special marker for success (will be archived)
+			State: StateDead,
 		}
 	}
 
@@ -80,66 +77,34 @@ func (e *Executor) classifyResult(job Job, err error, maxAttempts int) Execution
 
 	if job.Attempt >= maxAttempts {
 		return ExecutionResult{
-			State:         StateDead,
-			ErrorMsg:      errMsg,
-			ErrorClass:    errClass,
-			RefundAttempt: false,
+			State:      StateDead,
+			ErrorMsg:   errMsg,
+			ErrorClass: errClass,
 		}
 	}
 
 	switch errClass {
-	case ErrorClassResumable:
-		checkpoint := e.extractCheckpoint(err)
-		return ExecutionResult{
-			State:         StatePending,
-			ErrorMsg:      errMsg,
-			ErrorClass:    errClass,
-			Checkpoint:    checkpoint,
-			RunAt:         time.Now(),
-			RefundAttempt: true,
-		}
-
-	case ErrorClassTransport:
+	case ErrorClassTransport, ErrorClassRetryable, ErrorClassPanic:
 		backoff := CalculateBackoff(job.Attempt, e.config.RetryBase, e.config.RetryCap)
 		return ExecutionResult{
-			State:         StatePending,
-			ErrorMsg:      errMsg,
-			ErrorClass:    errClass,
-			RunAt:         time.Now().Add(backoff),
-			RefundAttempt: true,
-		}
-
-	case ErrorClassRetryable, ErrorClassPanic:
-		backoff := CalculateBackoff(job.Attempt, e.config.RetryBase, e.config.RetryCap)
-		return ExecutionResult{
-			State:         StatePending,
-			ErrorMsg:      errMsg,
-			ErrorClass:    errClass,
-			RunAt:         time.Now().Add(backoff),
-			RefundAttempt: false,
+			State:      StatePending,
+			ErrorMsg:   errMsg,
+			ErrorClass: errClass,
+			RunAt:      time.Now().Add(backoff),
 		}
 
 	case ErrorClassPermanent:
 		return ExecutionResult{
-			State:         StateDead,
-			ErrorMsg:      errMsg,
-			ErrorClass:    errClass,
-			RefundAttempt: false,
+			State:      StateDead,
+			ErrorMsg:   errMsg,
+			ErrorClass: errClass,
 		}
 
 	default:
 		return ExecutionResult{
-			State:         StateDead,
-			ErrorMsg:      errMsg,
-			ErrorClass:    errClass,
-			RefundAttempt: false,
+			State:      StateDead,
+			ErrorMsg:   errMsg,
+			ErrorClass: errClass,
 		}
 	}
-}
-
-func (e *Executor) extractCheckpoint(err error) []byte {
-	if checkpointErr, ok := err.(CheckpointError); ok {
-		return checkpointErr.Checkpoint()
-	}
-	return nil
 }

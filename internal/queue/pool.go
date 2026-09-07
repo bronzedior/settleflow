@@ -2,7 +2,6 @@ package queue
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -14,7 +13,6 @@ type JobMeta struct {
 	ID          JobID
 	Attempt     int
 	MaxAttempts int
-	Checkpoint  []byte
 	EnqueuedAt  time.Time
 	Payload     []byte
 }
@@ -22,17 +20,15 @@ type JobMeta struct {
 type Handler func(ctx context.Context, meta JobMeta) error
 
 type PoolConfig struct {
-	WorkerID          string
-	Queues            []string
-	Concurrency       int
-	MaxBatch          int
-	PollInterval      time.Duration
-	HeartbeatInterval time.Duration
-	ReaperThreshold   time.Duration
-	JobTimeout        time.Duration
-	StatementTimeout  time.Duration
-	IdleInTxnTimeout  time.Duration
-	Logger            *slog.Logger
+	WorkerID         string
+	Queues           []string
+	Concurrency      int
+	MaxBatch         int
+	PollInterval     time.Duration
+	JobTimeout       time.Duration
+	StatementTimeout time.Duration
+	IdleInTxnTimeout time.Duration
+	Logger           *slog.Logger
 }
 
 type Pool struct {
@@ -56,8 +52,6 @@ type Pool struct {
 type ActiveJob struct {
 	Mu            sync.Mutex
 	Meta          JobMeta
-	ProgressMu    sync.Mutex
-	LastProgress  []byte
 	IsDraining    bool
 	CancelContext context.CancelFunc
 }
@@ -189,22 +183,6 @@ func (p *Pool) UnregisterActive(id JobID) {
 	delete(p.activeJobs, id)
 }
 
-func (p *Pool) SetProgress(jobID JobID, checkpoint []byte) error {
-	p.activemu.Lock()
-	defer p.activemu.Unlock()
-
-	aj, ok := p.activeJobs[jobID]
-	if !ok {
-		return fmt.Errorf("job not active: %s", jobID)
-	}
-
-	aj.ProgressMu.Lock()
-	aj.LastProgress = checkpoint
-	aj.ProgressMu.Unlock()
-
-	return nil
-}
-
 func (p *Pool) JobFromContext(ctx context.Context) JobMeta {
 	if meta, ok := ctx.Value(jobMetaKey).(JobMeta); ok {
 		return meta
@@ -242,25 +220,6 @@ func (p *Pool) Claim() ([]Job, error) {
 	}
 
 	return p.store.ClaimJobs(p.baseCtx, p.config.WorkerID, p.config.Queues, k)
-}
-
-func (p *Pool) GetActiveJobsForHeartbeat() ([]JobID, [][]byte) {
-	p.activemu.Lock()
-	defer p.activemu.Unlock()
-
-	ids := make([]JobID, 0, len(p.activeJobs))
-	checkpoints := make([][]byte, 0, len(p.activeJobs))
-
-	for id, aj := range p.activeJobs {
-		aj.ProgressMu.Lock()
-		cp := aj.LastProgress
-		aj.ProgressMu.Unlock()
-
-		ids = append(ids, id)
-		checkpoints = append(checkpoints, cp)
-	}
-
-	return ids, checkpoints
 }
 
 func (p *Pool) BaseContext() context.Context {

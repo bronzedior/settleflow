@@ -12,27 +12,21 @@ import (
 
 type Worker struct {
 	lifecycle.ComponentBase
-	pool      *queue.Pool
-	heartbeat *queue.Heartbeat
-	reaper    *queue.Reaper
-	executor  *queue.Executor
-	logger    *slog.Logger
-	stopCh    chan struct{}
-	doneCh    chan struct{}
+	pool     *queue.Pool
+	executor *queue.Executor
+	logger   *slog.Logger
+	stopCh   chan struct{}
+	doneCh   chan struct{}
 }
 
 func NewWorker(
 	pool *queue.Pool,
-	heartbeat *queue.Heartbeat,
-	reaper *queue.Reaper,
 	executor *queue.Executor,
 	logger *slog.Logger,
 ) *Worker {
 	return &Worker{
 		ComponentBase: lifecycle.NewComponentBase("worker"),
 		pool:          pool,
-		heartbeat:     heartbeat,
-		reaper:        reaper,
 		executor:      executor,
 		logger:        logger,
 		stopCh:        make(chan struct{}),
@@ -102,7 +96,6 @@ func (w *Worker) handleJob(ctx context.Context, job queue.Job) {
 		ID:          job.ID,
 		Attempt:     job.Attempt,
 		MaxAttempts: job.MaxAttempts,
-		Checkpoint:  job.Checkpoint,
 		EnqueuedAt:  job.CreatedAt,
 		Payload:     job.Payload,
 	}
@@ -127,16 +120,7 @@ func (w *Worker) handleJob(ctx context.Context, job queue.Job) {
 
 	case queue.StatePending:
 		w.logger.Info("Job will retry", "jobID", job.ID, "errorClass", result.ErrorClass, "runAt", result.RunAt)
-
-		if result.RefundAttempt {
-			_ = w.pool.Store().RefundAttempt(ctx, job.ID, w.pool.Config().WorkerID)
-		}
-
-		if result.ErrorClass == queue.ErrorClassResumable {
-			_ = w.pool.Store().RetryJobWithCheckpoint(ctx, job.ID, w.pool.Config().WorkerID, result.RunAt, result.Checkpoint)
-		} else {
-			_ = w.pool.Store().RetryJob(ctx, job.ID, w.pool.Config().WorkerID, result.RunAt, result.ErrorMsg, result.ErrorClass)
-		}
+		_ = w.pool.Store().RetryJob(ctx, job.ID, w.pool.Config().WorkerID, result.RunAt, result.ErrorMsg, result.ErrorClass)
 
 		activeJob.Mu.Lock()
 		activeJob.IsDraining = true
@@ -152,7 +136,6 @@ func (w *Worker) makeJobContext(job queue.Job) (context.Context, context.CancelF
 		ID:          job.ID,
 		Attempt:     job.Attempt,
 		MaxAttempts: job.MaxAttempts,
-		Checkpoint:  job.Checkpoint,
 		EnqueuedAt:  job.CreatedAt,
 	})
 
@@ -165,27 +148,15 @@ func (w *Worker) makeJobContext(job queue.Job) (context.Context, context.CancelF
 var jobMetaKey = struct{}{}
 var isDrainingKey = struct{}{}
 
-func CreateWorkerStack(
+func CreateWorker(
 	pool *pgxpool.Pool,
 	config *queue.PoolConfig,
 	registry *queue.Registry,
 	logger *slog.Logger,
-) (*lifecycle.Supervisor, error) {
+) (*Worker, error) {
 	store := queue.NewStore(queue.WrapPgx(pool))
 
 	jobPool := queue.NewPool(store, config)
-	heartbeat := queue.NewHeartbeat(
-		jobPool,
-		store,
-		5*time.Second,
-		logger,
-	)
-	reaper := queue.NewReaper(
-		store,
-		60*time.Second,
-		30*time.Second,
-		logger,
-	)
 
 	executor := queue.NewExecutor(&queue.ExecutorConfig{
 		RetryBase: 1 * time.Second,
@@ -195,13 +166,5 @@ func CreateWorkerStack(
 		Registry:  registry,
 	})
 
-	worker := NewWorker(jobPool, heartbeat, reaper, executor, logger)
-
-	supervisor := lifecycle.NewSupervisor(logger)
-	supervisor.Register(jobPool)
-	supervisor.Register(reaper)
-	supervisor.Register(heartbeat)
-	supervisor.Register(worker)
-
-	return supervisor, nil
+	return NewWorker(jobPool, executor, logger), nil
 }

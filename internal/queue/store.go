@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -47,7 +46,7 @@ func (s *Store) ClaimJobs(ctx context.Context, workerID string, queues []string,
 	sql := `
 		UPDATE jobs j
 		SET state = $1, claimed_by = $2, claimed_at = now(),
-			heartbeat_at = now(), attempt = j.attempt + 1, updated_at = now()
+			attempt = j.attempt + 1, updated_at = now()
 		FROM (
 			SELECT id FROM jobs
 			WHERE state = $3 AND queue = ANY($4::text[]) AND run_at <= now()
@@ -58,8 +57,8 @@ func (s *Store) ClaimJobs(ctx context.Context, workerID string, queues []string,
 		WHERE j.id = s.id
 		RETURNING j.id, j.queue, j.job_type, j.payload_version, j.payload,
 			j.state, j.attempt, j.max_attempts, j.run_at, j.claimed_at,
-			j.claimed_by, j.heartbeat_at, j.last_error, j.last_error_class,
-			j.checkpoint, j.created_at, j.updated_at
+			j.claimed_by, j.last_error, j.last_error_class,
+			j.created_at, j.updated_at
 	`
 
 	rows, err := s.execer.Query(ctx, sql,
@@ -75,8 +74,8 @@ func (s *Store) ClaimJobs(ctx context.Context, workerID string, queues []string,
 		err := rows.Scan(
 			&j.ID, &j.Queue, &j.JobType, &j.PayloadVersion, &j.Payload,
 			&j.State, &j.Attempt, &j.MaxAttempts, &j.RunAt, &j.ClaimedAt,
-			&j.ClaimedBy, &j.HeartbeatAt, &j.LastError, &j.LastErrorClass,
-			&j.Checkpoint, &j.CreatedAt, &j.UpdatedAt,
+			&j.ClaimedBy, &j.LastError, &j.LastErrorClass,
+			&j.CreatedAt, &j.UpdatedAt,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan job: %w", err)
@@ -126,7 +125,7 @@ func (s *Store) FailJob(ctx context.Context, jobID JobID, workerID string, error
 func (s *Store) RetryJob(ctx context.Context, jobID JobID, workerID string, runAt interface{}, errorMsg string, errorClass ErrorClass) error {
 	sql := `
 		UPDATE jobs
-		SET state = $1, claimed_by = NULL, claimed_at = NULL, heartbeat_at = NULL,
+		SET state = $1, claimed_by = NULL, claimed_at = NULL,
 			run_at = $2, last_error = $3, last_error_class = $4, updated_at = now()
 		WHERE id = $5 AND claimed_by = $6
 	`
@@ -142,16 +141,16 @@ func (s *Store) RetryJob(ctx context.Context, jobID JobID, workerID string, runA
 
 func (s *Store) GetJob(ctx context.Context, jobID JobID) (*Job, error) {
 	sql := `SELECT id, queue, job_type, payload_version, payload, state, attempt,
-			max_attempts, run_at, claimed_at, claimed_by, heartbeat_at, last_error,
-			last_error_class, checkpoint, created_at, updated_at
+			max_attempts, run_at, claimed_at, claimed_by, last_error,
+			last_error_class, created_at, updated_at
 		FROM jobs WHERE id = $1`
 
 	var j Job
 	err := s.execer.QueryRow(ctx, sql, jobID).Scan(
 		&j.ID, &j.Queue, &j.JobType, &j.PayloadVersion, &j.Payload,
 		&j.State, &j.Attempt, &j.MaxAttempts, &j.RunAt, &j.ClaimedAt,
-		&j.ClaimedBy, &j.HeartbeatAt, &j.LastError, &j.LastErrorClass,
-		&j.Checkpoint, &j.CreatedAt, &j.UpdatedAt,
+		&j.ClaimedBy, &j.LastError, &j.LastErrorClass,
+		&j.CreatedAt, &j.UpdatedAt,
 	)
 
 	if err == pgx.ErrNoRows {
@@ -164,104 +163,11 @@ func (s *Store) GetJob(ctx context.Context, jobID JobID) (*Job, error) {
 	return &j, nil
 }
 
-func (s *Store) UpdateHeartbeat(ctx context.Context, workerID string, JobIDs []JobID, checkpoints [][]byte) error {
-	if len(JobIDs) == 0 {
-		return nil
-	}
-
-	sql := `UPDATE jobs j SET heartbeat_at = now(),
-					checkpoint = coalesce(v.checkpoint, j.checkpoint)
-			FROM (SELECT unnest($1::uuid[]) AS id, unnest($2::jsonb[]) AS checkpoint) v
-			WHERE j.id = v.id AND j.claimed_by = $3`
-
-	checkpointValues := make([]interface{}, len(checkpoints))
-	for i, cp := range checkpoints {
-		if cp != nil {
-			checkpointValues[i] = json.RawMessage(cp)
-		}
-	}
-
-	_, err := s.execer.Exec(ctx, sql, JobIDs, checkpointValues, workerID)
-	if err != nil {
-		return fmt.Errorf("update heartbeat: %w", err)
-	}
-
-	return nil
-}
-
-func (s *Store) ReclaimStaleJobs(ctx context.Context, threshold time.Duration, limit int) ([]Job, error) {
-	sql := `UPDATE jobs SET state = $1, claimed_by = NULL, claimed_at = NULL,
-				heartbeat_at = NULL, updated_at = now()
-			WHERE id IN (
-				SELECT id FROM jobs
-				WHERE state = $2 AND heartbeat_at < now() - $3::interval
-				ORDER BY heartbeat_at
-				FOR UPDATE SKIP LOCKED
-				LIMIT $4
-			)
-			RETURNING id, queue, job_type, payload_version, payload, state, attempt,
-				max_attempts, run_at, claimed_at, claimed_by, heartbeat_at, last_error,
-				last_error_class, checkpoint, created_at, updated_at`
-
-	rows, err := s.execer.Query(ctx, sql, string(StatePending), string(StateClaimed), threshold, limit)
-	if err != nil {
-		return nil, fmt.Errorf("reclaim stale jobs: %w", err)
-	}
-	defer rows.Close()
-
-	jobs := make([]Job, 0, limit)
-	for rows.Next() {
-		var j Job
-		err := rows.Scan(
-			&j.ID, &j.Queue, &j.JobType, &j.PayloadVersion, &j.Payload,
-			&j.State, &j.Attempt, &j.MaxAttempts, &j.RunAt, &j.ClaimedAt,
-			&j.ClaimedBy, &j.HeartbeatAt, &j.LastError, &j.LastErrorClass,
-			&j.Checkpoint, &j.CreatedAt, &j.UpdatedAt,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("scan reclaimed job: %w", err)
-		}
-		jobs = append(jobs, j)
-	}
-
-	if err = rows.Err(); err != nil {
-		return nil, fmt.Errorf("rows error: %w", err)
-	}
-
-	return jobs, nil
-}
-
-func (s *Store) RefundAttempt(ctx context.Context, jobID JobID, workerID string) error {
-	sql := `UPDATE jobs SET attempt = attempt - 1, updated_at = now()
-			WHERE id = $1 AND claimed_by = $2 AND attempt > 0`
-
-	_, err := s.execer.Exec(ctx, sql, jobID, workerID)
-	if err != nil {
-		return fmt.Errorf("refund attempt: %w", err)
-	}
-
-	return nil
-}
-
-func (s *Store) RetryJobWithCheckpoint(ctx context.Context, jobID JobID, workerID string, runAt interface{}, checkpoint []byte) error {
-	sql := `UPDATE jobs
-			SET state = $1, claimed_by = NULL, claimed_at = NULL, heartbeat_at = NULL,
-				run_at = $2, checkpoint = $3, attempt = attempt - 1, updated_at = now()
-			WHERE id = $4 AND claimed_by = $5`
-
-	_, err := s.execer.Exec(ctx, sql,
-		string(StatePending), runAt, checkpoint, jobID, workerID)
-	if err != nil {
-		return fmt.Errorf("retry job with checkpoint: %w", err)
-	}
-
-	return nil
-}
 
 func (s *Store) ListDeadLetter(ctx context.Context, queue string, limit int) ([]Job, error) {
 	sql := `SELECT id, queue, job_type, payload_version, payload, state, attempt,
-			max_attempts, run_at, claimed_at, claimed_by, heartbeat_at, last_error,
-			last_error_class, checkpoint, created_at, updated_at
+			max_attempts, run_at, claimed_at, claimed_by, last_error,
+			last_error_class, created_at, updated_at
 		FROM jobs
 		WHERE state = $1 AND queue = $2
 		ORDER BY updated_at DESC
@@ -279,8 +185,8 @@ func (s *Store) ListDeadLetter(ctx context.Context, queue string, limit int) ([]
 		err := rows.Scan(
 			&j.ID, &j.Queue, &j.JobType, &j.PayloadVersion, &j.Payload,
 			&j.State, &j.Attempt, &j.MaxAttempts, &j.RunAt, &j.ClaimedAt,
-			&j.ClaimedBy, &j.HeartbeatAt, &j.LastError, &j.LastErrorClass,
-			&j.Checkpoint, &j.CreatedAt, &j.UpdatedAt,
+			&j.ClaimedBy, &j.LastError, &j.LastErrorClass,
+			&j.CreatedAt, &j.UpdatedAt,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan dead letter job: %w", err)

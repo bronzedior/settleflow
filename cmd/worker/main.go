@@ -59,25 +59,23 @@ func run() error {
 	}
 
 	config := &queue.PoolConfig{
-		WorkerID:          workerID,
-		Queues:            []string{"default"},
-		Concurrency:       10,
-		MaxBatch:          10,
-		PollInterval:      1 * time.Second,
-		HeartbeatInterval: 5 * time.Second,
-		ReaperThreshold:   60 * time.Second,
-		JobTimeout:        30 * time.Second,
-		Logger:            logger,
+		WorkerID:     workerID,
+		Queues:       []string{"default"},
+		Concurrency:  10,
+		MaxBatch:     10,
+		PollInterval: 1 * time.Second,
+		JobTimeout:   30 * time.Second,
+		Logger:       logger,
 	}
 
-	supervisor, err := worker.CreateWorkerStack(pool, config, registry, logger)
+	w, err := worker.CreateWorker(pool, config, registry, logger)
 	if err != nil {
-		return fmt.Errorf("create worker stack: %w", err)
+		return fmt.Errorf("create worker: %w", err)
 	}
 
 	logger.Info("Starting worker", "workerID", workerID)
-	if err := supervisor.StartAll(ctx); err != nil {
-		return fmt.Errorf("start worker stack: %w", err)
+	if err := w.Start(ctx); err != nil {
+		return fmt.Errorf("start worker: %w", err)
 	}
 
 	<-ctx.Done()
@@ -86,7 +84,7 @@ func run() error {
 	stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	return supervisor.StopAll(stopCtx)
+	return w.Stop(stopCtx)
 }
 
 func applyMigrations(ctx context.Context, databaseURL string) error {

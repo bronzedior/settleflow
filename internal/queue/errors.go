@@ -15,12 +15,6 @@ type PermanentError interface {
 	Permanent() bool
 }
 
-type CheckpointError interface {
-	error
-	Checkpoint() []byte
-	Resumable() bool
-}
-
 type PanicError interface {
 	error
 	IsPanic() bool
@@ -75,30 +69,6 @@ func Permanent(err error) error {
 	return &permanentErr{err: err}
 }
 
-type checkpointErr struct {
-	err        error
-	checkpoint []byte
-}
-
-func (e *checkpointErr) Error() string {
-	return fmt.Sprintf("resumable: %v", e.err)
-}
-
-func (e *checkpointErr) Checkpoint() []byte {
-	return e.checkpoint
-}
-
-func (e *checkpointErr) Resumable() bool {
-	return true
-}
-
-func Resume(checkpoint []byte) error {
-	return &checkpointErr{
-		err:        fmt.Errorf("resumable"),
-		checkpoint: checkpoint,
-	}
-}
-
 type transportErr struct {
 	err error
 }
@@ -145,9 +115,6 @@ func ClassifyError(err error) ErrorClass {
 	if _, ok := err.(PanicError); ok {
 		return ErrorClassPanic
 	}
-	if _, ok := err.(CheckpointError); ok {
-		return ErrorClassResumable
-	}
 	if _, ok := err.(TransportError); ok {
 		return ErrorClassTransport
 	}
@@ -159,10 +126,6 @@ func ClassifyError(err error) ErrorClass {
 	}
 
 	return ErrorClassRetryable
-}
-
-func ShouldRefundAttempt(errClass ErrorClass) bool {
-	return errClass == ErrorClassTransport || errClass == ErrorClassResumable
 }
 
 func CalculateBackoff(attempt int, retryBase time.Duration, retryCap time.Duration) time.Duration {
