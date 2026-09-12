@@ -2,111 +2,60 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
-	"github.com/bronzedior/settleflow/internal/migrations"
-	"github.com/bronzedior/settleflow/internal/queue"
-	"github.com/bronzedior/settleflow/internal/worker"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/riverqueue/river"
+	"github.com/riverqueue/river/riverdriver/riverpgxv5"
+
+	"github.com/bronzedior/custodian/internal/jobs"
 )
 
 func main() {
 	if err := run(); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		slog.Error("worker exited", "error", err)
 		os.Exit(1)
 	}
 }
 
 func run() error {
-	databaseURL := os.Getenv("DATABASE_URL")
-	if databaseURL == "" {
-		return fmt.Errorf("DATABASE_URL not set")
-	}
-
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := applyMigrations(ctx, databaseURL); err != nil {
-		return fmt.Errorf("apply migrations: %w", err)
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		databaseURL = "postgres://custodian:custodian@localhost:5432/custodian?sslmode=disable"
 	}
 
 	pool, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {
-		return fmt.Errorf("connect to database: %w", err)
+		return err
 	}
 	defer pool.Close()
 
-	if err := pool.Ping(ctx); err != nil {
-		return fmt.Errorf("ping database: %w", err)
-	}
+	workers := river.NewWorkers()
+	river.AddWorker(workers, &jobs.PingWorker{})
 
-	workerID := os.Getenv("WORKER_ID")
-	if workerID == "" {
-		workerID = fmt.Sprintf("worker-%d", os.Getpid())
-	}
-
-	registry := queue.NewRegistry(logger)
-	if err := registerHandlers(registry); err != nil {
-		return fmt.Errorf("register handlers: %w", err)
-	}
-
-	config := &queue.PoolConfig{
-		WorkerID:     workerID,
-		Queues:       []string{"default"},
-		Concurrency:  10,
-		MaxBatch:     10,
-		PollInterval: 1 * time.Second,
-		JobTimeout:   30 * time.Second,
-		Logger:       logger,
-	}
-
-	w, err := worker.CreateWorker(pool, config, registry, logger)
-	if err != nil {
-		return fmt.Errorf("create worker: %w", err)
-	}
-
-	logger.Info("Starting worker", "workerID", workerID)
-	if err := w.Start(ctx); err != nil {
-		return fmt.Errorf("start worker: %w", err)
-	}
-
-	<-ctx.Done()
-	logger.Info("Shutdown signal received, draining in-flight jobs")
-
-	stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	return w.Stop(stopCtx)
-}
-
-func applyMigrations(ctx context.Context, databaseURL string) error {
-	conn, err := pgx.Connect(ctx, databaseURL)
-	if err != nil {
-		return fmt.Errorf("connect for migrations: %w", err)
-	}
-	defer conn.Close(ctx)
-
-	return migrations.RunMigrations(ctx, conn)
-}
-
-type TestJobArgs struct {
-	Index    int    `json:"index"`
-	Duration string `json:"duration"`
-}
-
-func registerHandlers(registry *queue.Registry) error {
-	return queue.Register(registry, "test", 1, 20, func(ctx context.Context, args TestJobArgs) error {
-		if d, err := time.ParseDuration(args.Duration); err == nil {
-			time.Sleep(d)
-		}
-		return nil
+	riverClient, err := river.NewClient(riverpgxv5.New(pool), &river.Config{
+		Queues: map[string]river.QueueConfig{
+			river.QueueDefault: {MaxWorkers: 10},
+		},
+		Workers: workers,
 	})
+	if err != nil {
+		return err
+	}
+
+	if err := riverClient.Start(ctx); err != nil {
+		return err
+	}
+
+	slog.Info("worker started", "database_url", databaseURL)
+	<-ctx.Done()
+
+	slog.Info("worker shutting down")
+	return riverClient.Stop(context.Background())
 }
