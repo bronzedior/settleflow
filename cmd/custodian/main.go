@@ -7,10 +7,8 @@ import (
 	"os"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/riverqueue/river"
-	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 
-	"github.com/bronzedior/custodian/internal/jobs"
+	"github.com/bronzedior/custodian/internal/migrations"
 )
 
 func main() {
@@ -22,41 +20,40 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: custodian <ping>")
+		return fmt.Errorf("usage: custodian <migrate|ping|scan|runs|findings|show>")
 	}
 
-	switch args[0] {
-	case "ping":
-		return ping(context.Background())
-	default:
-		return fmt.Errorf("unknown command %q", args[0])
-	}
-}
-
-// ping enqueues a PingArgs job and prints its id, proving the CLI can reach
-// PostgreSQL and hand work to the queue (Phase 0 done criterion).
-func ping(ctx context.Context) error {
-	databaseURL := os.Getenv("DATABASE_URL")
-	if databaseURL == "" {
-		databaseURL = "postgres://custodian:custodian@localhost:5432/custodian?sslmode=disable"
-	}
-
-	pool, err := pgxpool.New(ctx, databaseURL)
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, databaseURL())
 	if err != nil {
 		return err
 	}
 	defer pool.Close()
 
-	riverClient, err := river.NewClient(riverpgxv5.New(pool), &river.Config{})
-	if err != nil {
-		return err
+	switch args[0] {
+	case "migrate":
+		return migrations.Apply(ctx, pool)
+	case "ping":
+		return ping(ctx, pool)
+	case "scan":
+		return scan(ctx, pool)
+	case "runs":
+		return runs(ctx, pool)
+	case "findings":
+		return findings(ctx, pool, args[1:])
+	case "show":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: custodian show <fingerprint>")
+		}
+		return show(ctx, pool, args[1])
+	default:
+		return fmt.Errorf("unknown command %q", args[0])
 	}
+}
 
-	result, err := riverClient.Insert(ctx, jobs.PingArgs{Message: "ping"}, nil)
-	if err != nil {
-		return err
+func databaseURL() string {
+	if v := os.Getenv("DATABASE_URL"); v != "" {
+		return v
 	}
-
-	fmt.Println(result.Job.ID)
-	return nil
+	return "postgres://custodian:custodian@localhost:5432/custodian?sslmode=disable"
 }

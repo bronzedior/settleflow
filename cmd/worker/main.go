@@ -7,11 +7,14 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 
+	"github.com/bronzedior/custodian/internal/graph"
 	"github.com/bronzedior/custodian/internal/jobs"
+	"github.com/bronzedior/custodian/internal/migrations"
 )
 
 func main() {
@@ -36,17 +39,31 @@ func run() error {
 	}
 	defer pool.Close()
 
-	workers := river.NewWorkers()
-	river.AddWorker(workers, &jobs.PingWorker{})
+	if err := migrations.Apply(ctx, pool); err != nil {
+		return err
+	}
 
+	workers := river.NewWorkers()
 	riverClient, err := river.NewClient(riverpgxv5.New(pool), &river.Config{
 		Queues: map[string]river.QueueConfig{
-			river.QueueDefault: {MaxWorkers: 10},
+			river.QueueDefault:  {MaxWorkers: 10},
+			jobs.QueueDiscovery: {MaxWorkers: 10},
 		},
 		Workers: workers,
 	})
 	if err != nil {
 		return err
+	}
+
+	river.AddWorker(workers, &jobs.PingWorker{})
+
+	if cred, err := azidentity.NewWorkloadIdentityCredential(nil); err != nil {
+		slog.Warn("discovery workers disabled: no workload identity credential", "error", err)
+	} else {
+		graphClient := graph.NewClient(cred)
+		river.AddWorker(workers, &jobs.DiscoverPageWorker{DB: pool, Graph: graphClient, River: riverClient})
+		river.AddWorker(workers, &jobs.DiscoverDetailWorker{DB: pool, Graph: graphClient})
+		river.AddWorker(workers, &jobs.EvaluateScanRunWorker{DB: pool})
 	}
 
 	if err := riverClient.Start(ctx); err != nil {
